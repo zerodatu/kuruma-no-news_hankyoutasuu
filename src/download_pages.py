@@ -8,14 +8,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-#  .\env\Scripts\python.exe  .\src\download_pages.py 327147 933895
-
 # === 設定 ===
 BASE_URL = "https://kuruma-news.jp/post/"
-MAX_WORKERS = 100  # スレッド数
+MAX_WORKERS = 100  # スレッド数はそのまま 必要なら後で下げてね
 DOWNLOAD_DIR = "download"
-WAIT_BETWEEN_REQUESTS = (0, 0) # waitをゼロに設定する
-MAX_PAGES_PER_ARTICLE = 40  # 念のための上限
+WAIT_BETWEEN_REQUESTS = (0.4, 1.2)  # ← ランダムゆらしで優しく
+MAX_PAGES_PER_ARTICLE = 40
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -59,6 +57,35 @@ def save_html(text, path):
         f.write(text)
 
 
+def head_exists(url):
+    """
+    記事の存在を軽く確認する関数
+    - 200台なら存在とみなす
+    - 301/302/308 などリダイレクトも allow_redirects=True で追従して最終ステータスを判定
+    - 405 や HEAD非対応っぽい時は GET(stream=True) にフォールバックして本文は読まない
+    """
+    try:
+        res = SESSION.head(url, timeout=10, allow_redirects=True)
+        code = res.status_code
+        # 一部サイトは HEAD に 405 を返すことがあるのでフォールバック
+        if code in (405, 400):  # 仕様によって調整してね
+            res = SESSION.get(url, timeout=10, allow_redirects=True, stream=True)
+            code = res.status_code
+            # 早めに接続を閉じる
+            res.close()
+        if 200 <= code < 300:
+            return True
+        if code in (401, 403, 404, 410):
+            return False
+        if code >= 500:
+            # サーバがつらそうなら今回は見送り
+            return False
+        # その他は慎重に False
+        return False
+    except requests.RequestException:
+        return False
+
+
 def fetch(url):
     try:
         res = SESSION.get(url, timeout=15, allow_redirects=True)
@@ -80,10 +107,17 @@ def fetch(url):
 
 def download_article_with_paging(article_id):
     """
-    /<id> 本文と /<id>/<n> のページを順に取得して保存
-    404 や同一コンテンツ検知で終了
+    まず /<id> の存在チェックをしてから本文取得へ進む
+    /<id> 本文と /<id>/<n> のページを順に取得し 保存
     """
     base = f"{BASE_URL}{article_id}"
+
+    # 先に存在チェック
+    if not head_exists(base):
+        print(f"{base} → 存在なしっぽいのでスキップ")
+        polite_sleep()
+        return False
+
     last_hash = None
     got_any = False
 
@@ -92,25 +126,22 @@ def download_article_with_paging(article_id):
         text, code = fetch(url)
 
         if text is None:
-            # 1ページ目で404なら記事自体無し
             if page == 1 and code == 404:
                 print(f"{url} → 404 Not Found スキップ")
             elif code in (401, 403):
-                print(f"{url} → {code} Forbidden たぶんBOT弾き スキップ")
+                print(f"{url} → {code} Forbidden スキップ")
             elif code >= 500 and code != -1:
                 print(f"{url} → {code} Server Error スキップ")
             polite_sleep()
             break
 
-        # 同一ハッシュ検知で終了
         h = hashlib.md5(text.encode("utf-8")).hexdigest()
         if last_hash is not None and h == last_hash:
-            print(f"{url} → 同一コンテンツ検知 多重ページ無しっぽいので終了")
+            print(f"{url} → 同一コンテンツ検知 終了")
             polite_sleep()
             break
         last_hash = h
 
-        # 保存
         file_path = os.path.join(
             DOWNLOAD_DIR,
             f"{article_id}.html" if page == 1 else f"{article_id}_{page}.html",
@@ -120,11 +151,6 @@ def download_article_with_paging(article_id):
 
         got_any = True
         polite_sleep()
-
-        # 次ページが無い目安を軽く見る
-        # ざっくりと rel="next" や class に page-numbers が無いっぽい時は次の番号を試して
-        # 404 なら終わり 200 なら続行という方針にしてる
-        # ここでは追加リクエストはせず 次ループで /n+1 を普通に試すよ
 
     return got_any
 
