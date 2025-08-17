@@ -8,13 +8,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-#  .\env\Scripts\python.exe  .\src\download_pages.py 228809 933895
+#  .\env\Scripts\python.exe  .\src\download_pages.py 327147 933895
 
 # === 設定 ===
 BASE_URL = "https://kuruma-news.jp/post/"
-MAX_WORKERS = 18  # 控えめにね
+MAX_WORKERS = 100  # スレッド数
 DOWNLOAD_DIR = "download"
-WAIT_BETWEEN_REQUESTS = (0.6, 1.2)  # ランダム間隔で優しく
+WAIT_BETWEEN_REQUESTS = (0, 0) # waitをゼロに設定する
 MAX_PAGES_PER_ARTICLE = 40  # 念のための上限
 
 HEADERS = {
