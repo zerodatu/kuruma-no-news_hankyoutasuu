@@ -7,6 +7,7 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from art import *
 
 # === 設定 ===
 BASE_URL = "https://kuruma-news.jp/post/"
@@ -130,6 +131,8 @@ def download_article_with_paging(article_id):
                 print(f"{url} → 404 Not Found スキップ")
             elif code in (401, 403):
                 print(f"{url} → {code} Forbidden スキップ")
+                tprint(f"Forbidden Gundom")
+                sys.exit(1)
             elif code >= 500 and code != -1:
                 print(f"{url} → {code} Server Error スキップ")
             polite_sleep()
