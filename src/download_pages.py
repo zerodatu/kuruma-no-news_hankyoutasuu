@@ -11,7 +11,7 @@ from art import *
 
 # === 設定 ===
 BASE_URL = "https://kuruma-news.jp/post/"
-MAX_WORKERS = 100  # スレッド数はそのまま 必要なら後で下げてね
+MAX_WORKERS = 8  # スレッド数を現実的な値に下げ、サーバー負荷を軽減します
 DOWNLOAD_DIR = "download"
 WAIT_BETWEEN_REQUESTS = (0.4, 1.2)  # ← ランダムゆらしで優しく
 MAX_PAGES_PER_ARTICLE = 40
