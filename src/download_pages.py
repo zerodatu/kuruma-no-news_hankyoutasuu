@@ -7,12 +7,16 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from tqdm import tqdm
 from art import *
 
 # === 設定 ===
 BASE_URL = "https://kuruma-news.jp/post/"
 MAX_WORKERS = 8  # スレッド数を現実的な値に下げ、サーバー負荷を軽減します
 DOWNLOAD_DIR = "download"
+DOWNLOAD_SIZE_LIMIT_GB = 25  # フォルダサイズのGB上限
+DOWNLOAD_SIZE_LIMIT_BYTES = DOWNLOAD_SIZE_LIMIT_GB * 1024 * 1024 * 1024
+
 WAIT_BETWEEN_REQUESTS = (0.4, 1.2)  # ← ランダムゆらしで優しく
 MAX_PAGES_PER_ARTICLE = 40
 
@@ -47,6 +51,21 @@ def make_session():
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 SESSION = make_session()
+
+
+def get_directory_size(directory):
+    """指定されたディレクトリの合計サイズをバイト単位で返す"""
+    total_size = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(directory):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                # シンボリックリンクは計算から除外
+                if not os.path.islink(fp):
+                    total_size += os.path.getsize(fp)
+    except FileNotFoundError:
+        return 0
+    return total_size
 
 
 def polite_sleep():
@@ -159,13 +178,28 @@ def download_article_with_paging(article_id):
 
 
 def main(start_id, end_id):
+    # 最初に現在のフォルダサイズをチェック
+    initial_size = get_directory_size(DOWNLOAD_DIR)
+    if initial_size >= DOWNLOAD_SIZE_LIMIT_BYTES:
+        size_gb = initial_size / (1024**3)
+        print(f"処理開始前に、すでにフォルダサイズが上限 ({size_gb:.2f}GB / {DOWNLOAD_SIZE_LIMIT_GB}GB) を超えています。")
+        return
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [
             executor.submit(download_article_with_paging, i)
             for i in range(start_id, end_id + 1)
         ]
-        for fut in as_completed(futures):
+
+        progress = tqdm(as_completed(futures), total=len(futures), desc="ダウンロード中", unit="記事")
+        for fut in progress:
             fut.result()
+
+            current_size = get_directory_size(DOWNLOAD_DIR)
+            progress.set_postfix_str(f"Size: {current_size / (1024**3):.2f}GB / {DOWNLOAD_SIZE_LIMIT_GB}GB")
+            if current_size >= DOWNLOAD_SIZE_LIMIT_BYTES:
+                print(f"\n[停止] フォルダサイズが上限 ({DOWNLOAD_SIZE_LIMIT_GB}GB) に達しました。処理を終了します。")
+                break
 
 
 if __name__ == "__main__":
