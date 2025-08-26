@@ -62,25 +62,6 @@ def polite_sleep():
     # from download_pages.py
     time.sleep(random.uniform(*WAIT_BETWEEN_REQUESTS))
 
-def head_exists(url):
-    # from download_pages.py
-    try:
-        res = SESSION.head(url, timeout=10, allow_redirects=True)
-        code = res.status_code
-        if code in (405, 400):
-            res = SESSION.get(url, timeout=10, allow_redirects=True, stream=True)
-            code = res.status_code
-            res.close()
-        if 200 <= code < 300:
-            return True
-        if code in (401, 403, 404, 410):
-            return False
-        if code >= 500:
-            return False
-        return False
-    except requests.RequestException:
-        return False
-
 def fetch(url):
     # from download_pages.py (modified to return response object)
     try:
@@ -124,8 +105,14 @@ def extract_words(text: str) -> list[str]:
     # from main.py
     words: list[str] = []
     for token in tokenizer.tokenize(text):
-        if isinstance(token, Token) and token.part_of_speech.split(",")[0] == "名詞":
-            words.append(token.surface)
+        # janomeが稀に特殊なトークンを生成するケースに備え、より堅牢なチェックを行います。
+        # 1. tokenがTokenオブジェクトであること
+        # 2. part_of_speech属性が文字列であること (Noneなどではないことを確認)
+        if isinstance(token, Token) and isinstance(token.part_of_speech, str):
+            parts = token.part_of_speech.split(",")
+            # 3. split結果が空でなく、かつ最初の要素が「名詞」であること
+            if parts and parts[0] == "名詞":
+                words.append(token.surface)
     return words
 
 def parse_html_content(html_content: str, url_for_log: str) -> set[str] | None:
@@ -159,23 +146,19 @@ def parse_html_content(html_content: str, url_for_log: str) -> set[str] | None:
 def process_article(article_id: int):
     # from download_pages.py's download_article_with_paging (modified)
     base_url = f"{BASE_URL}{article_id}"
-
-    if not head_exists(base_url):
-        # print(f"Article {article_id} -> Not found, skipping.") # ログが多すぎるのでコメントアウト
-        polite_sleep()
-        return None
-
     last_hash = None
     article_words = set()
     got_any = False
 
     for page in range(1, MAX_PAGES_PER_ARTICLE + 1):
         url = base_url if page == 1 else f"{base_url}/{page}"
+        # 記事の存在確認(HEAD)とコンテンツ取得(GET)を1回のGETリクエストにまとめる
         res, code = fetch(url)
 
         if res is None:
+            # 最初のページ取得時に404が返ってきた場合は、記事が存在しないと判断
             if page == 1 and code == 404:
-                pass # head_existsでチェック済みだが念のため
+                pass # ログは出さずに、下のpolite_sleep()とbreakでこの記事をスキップ
             elif code in (401, 403):
                 print(f"{url} -> {code} Forbidden. Exiting.")
                 tprint(f"Forbidden Gundom")
@@ -183,6 +166,7 @@ def process_article(article_id: int):
                 return "FORBIDDEN"
             elif code >= 500 and code != -1:
                 print(f"{url} -> {code} Server Error. Skipping article.")
+            # 失敗時はスリープして、この記事の処理を中断する
             polite_sleep()
             break
 
