@@ -1,0 +1,6 @@
+requests
+tqdm
+beautifulsoup4
+lxml
+janome
+art
