@@ -4,7 +4,7 @@ import time
 import random
 import hashlib
 import csv
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from tqdm import tqdm
@@ -18,7 +18,9 @@ BASE_URL = "https://kuruma-news.jp/post/"
 MAX_WORKERS = 8  # ネットワークアクセスを伴うため、サーバー負荷を考慮したスレッド数
 WAIT_BETWEEN_REQUESTS = (0.4, 1.2)  # 丁寧なアクセス間隔
 MAX_PAGES_PER_ARTICLE = 40
-OUTPUT_CSV_NAME = "word_occurrences_live.csv"
+OUTPUT_CSV_NAME = "word_counts.csv"
+PENDING_FACTOR = 4  # キューの膨張を防ぐためのペンディング上限倍率
+VERBOSE = False     # Trueにすると各記事OKログを出す
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -201,7 +203,8 @@ def process_article(article_id: int):
         polite_sleep()
 
     if got_any:
-        print(f"Article {article_id} -> OK, {len(article_words)} unique words found.")
+        if VERBOSE:
+            print(f"Article {article_id} -> OK, {len(article_words)} unique words found.")
         return article_id, article_words
     else:
         return None
@@ -210,30 +213,61 @@ def process_article(article_id: int):
 
 def main(start_id, end_id):
     t0 = time.time()
-    word_occurrences = defaultdict(list)
+    # メモリ使用量削減: 記事IDリストを持たず、単語ごとの出現記事数のみをカウント
+    word_counts = defaultdict(int)
 
-    article_ids = list(range(start_id, end_id + 1))
+    article_ids = range(start_id, end_id + 1)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(process_article, i) for i in article_ids]
+        ids_iter = iter(article_ids)
+        max_pending = max(1, MAX_WORKERS * PENDING_FACTOR)
+        futures = set()
 
-        progress = tqdm(as_completed(futures), total=len(futures), desc="記事を解析中", unit="記事")
-        for fut in progress:
+        # 初期投入
+        try:
+            for _ in range(max_pending):
+                i = next(ids_iter)
+                futures.add(executor.submit(process_article, i))
+        except StopIteration:
+            pass
+
+        progress = tqdm(total=(end_id - start_id + 1), desc="記事を解析中", unit="記事")
+        stop_all = False
+
+        while futures and not stop_all:
+            done, pending = wait(futures, return_when=FIRST_COMPLETED)
+            futures = pending
+            for fut in done:
+                progress.update(1)
+                try:
+                    result = fut.result()
+                    if result == "FORBIDDEN":
+                        print("\n[停止] 403 Forbidden を受信したため、処理を中断します。")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        stop_all = True
+                        break
+                    if result:
+                        article_id, words = result
+                        # 記事内ユニーク語のみカウント（すでにset）
+                        for word in words:
+                            word_counts[word] += 1
+                except Exception as e:
+                    print(f"A worker thread caused an error: {e}")
+
+            if stop_all:
+                break
+
+            # ペンディング上限まで補充
             try:
-                result = fut.result()
-                if result == "FORBIDDEN":
-                    print("\n[停止] 403 Forbidden を受信したため、処理を中断します。")
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-                if result:
-                    article_id, words = result
-                    for word in words:
-                        word_occurrences[word].append(str(article_id))
-            except Exception as e:
-                print(f"A worker thread caused an error: {e}")
+                while len(futures) < max_pending:
+                    i = next(ids_iter)
+                    futures.add(executor.submit(process_article, i))
+            except StopIteration:
+                pass
 
+        progress.close()
 
-    if not word_occurrences:
+    if not word_counts:
         print("有効な単語が1つも見つかりませんでした。")
         return
 
@@ -242,13 +276,13 @@ def main(start_id, end_id):
     try:
         with open(OUTPUT_CSV_NAME, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
-            writer.writerow(["単語", "出現記事数", "記事IDリスト"])
+            writer.writerow(["単語", "出現記事数"])
             # 出現記事数でソート
             sorted_words = sorted(
-                word_occurrences.items(), key=lambda item: len(item[1]), reverse=True
+                word_counts.items(), key=lambda item: item[1], reverse=True
             )
-            for word, ids in sorted_words:
-                writer.writerow([word, len(ids), ", ".join(ids)])
+            for word, cnt in sorted_words:
+                writer.writerow([word, cnt])
         print(f"CSV出力完了: {OUTPUT_CSV_NAME}")
     except IOError as e:
         print(f"CSVファイルの書き出しに失敗しました: {e}")
